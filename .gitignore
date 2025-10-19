@@ -1,0 +1,5 @@
+/.idea/
+/docker/
+/api/.kotlin/
+/worker/.kotlin/
+.DS_Store

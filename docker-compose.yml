@@ -1,0 +1,61 @@
+services:
+  media-library-api:
+    build:
+      context: "api/"
+      dockerfile: "Dockerfile"
+      target: "development"
+    volumes:
+      - "./api:/app"
+      - "./docker/file/uploads:/app/uploads"
+    ports:
+      - "4000:9000"
+
+  media-library-worker:
+    build:
+      context: "worker/"
+      dockerfile: "Dockerfile"
+      target: "development"
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    volumes:
+      - "./worker:/app"
+      - "./docker/file/uploads:/app/uploads"
+
+  media-library-sql:
+    #    image: "mysql:8.4.0"
+    image: "mariadb:11.8.2-noble"
+    ports:
+      - "4001:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 'admin'
+      MYSQL_USER: 'admin'
+      MYSQL_PASSWORD: 'test'
+      MYSQL_DATABASE: 'hal-media-library'
+    volumes:
+      - "./docker/mysql/data:/var/lib/mysql"
+  media-library-data-storage:
+    image: "minio/minio:latest"
+    ports:
+      - "4002:9000"
+      - "4003:9001"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "adminuser"
+      MINIO_ROOT_PASSWORD: "adminuser"
+    volumes:
+      - "./docker/minio:/data"
+  media-library-rabbitmq:
+    image: "rabbitmq:4.1.2-management-alpine"
+    ports:
+      - "4004:5672"
+      - "4005:15672"
+    volumes:
+      - "./docker/rabbitmq/data/:/var/lib/rabbitmq/"
+      - "./docker/rabbitmq/log/:/var/log/rabbitmq"
+  media-library-elasticmq:
+    image: "softwaremill/elasticmq:latest"
+    ports:
+      - ":4006:9324"
+      - ":4007:9325"
