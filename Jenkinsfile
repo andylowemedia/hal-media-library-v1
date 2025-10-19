@@ -27,7 +27,7 @@ node {
         checkout scm
         def tag = sh(returnStdout: true, script: "git tag --contains | head -1").trim()
 
-        docker.build("low-emedia/hal-media-library-v1-api:latest", "-f api/Dockerfile app/. --target production")
+        docker.build("low-emedia/hal-media-library-v1-api:latest", "-f api/Dockerfile api/. --target production")
         docker.withRegistry('https://540688370389.dkr.ecr.eu-west-1.amazonaws.com', 'ecr:eu-west-1:aws-lowemedia') {
             docker.image("low-emedia/hal-media-library-v1-api").push(tag)
         }
@@ -45,7 +45,7 @@ node {
             s3Upload(file: "app.zip", bucket:"low-emedia-apps", path:"hal-media-library-v1-api/${tag}/")
         }
 
-        docker.build("low-emedia/hal-media-library-v1-worker:latest", "-f worker/Dockerfile app/. --target production")
+        docker.build("low-emedia/hal-media-library-v1-worker:latest", "-f worker/Dockerfile worker/. --target production")
         docker.withRegistry('https://540688370389.dkr.ecr.eu-west-1.amazonaws.com', 'ecr:eu-west-1:aws-lowemedia') {
             docker.image("low-emedia/hal-media-library-v1-worker").push(tag)
         }
