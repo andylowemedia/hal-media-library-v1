@@ -33,26 +33,29 @@ data class ConversionPayload(
 )
 
 @Serializable
-data class VideoStream(
+data class FileStream(
     val codec_name: String,
-    val width: Int,
-    val height: Int,
-    val r_frame_rate: String,
-    val bit_rate: String,
-)
+) {
+    var width: Int? = null
+    var height: Int? = null
+    var r_frame_rate: String? = null
+    var bit_rate: String? = null
+
+}
 
 @Serializable
-data class VideoFormat(
-    val duration: String,
-    val bit_rate: String,
+data class Format(
+    val duration: String?,
+    val bit_rate: String?,
+    val format_name: String?,
 )
 
 
 @Serializable
-data class VideoMetadata(
+data class FileMetadata(
     val programs: List<String>,
-    val streams: List<VideoStream>,
-    val format: VideoFormat,
+    val streams: List<FileStream>,
+    val format: Format,
 )
 class FileProcessor() : ProcessorInterface {
     override fun process(payload: String, headers: Map<String, Any>): Unit {
@@ -60,11 +63,47 @@ class FileProcessor() : ProcessorInterface {
             val conversionPayload: ConversionPayload = Json.decodeFromString(payload)
             val nameParts = conversionPayload.file.split(".")
             val settings = this.runFfprobe(conversionPayload.file, AppConfig.uploadDir)
-            this.runFfmpegSimple(conversionPayload.file, "${nameParts[0]}.m3u8", AppConfig.uploadDir)
-            this.uploadFileToS3(nameParts[0], conversionPayload.userId)
+
+            val format = settings.format.format_name ?: throw Exception("Unrecognized format")
+
+            val mediaType = when {
+                format.contains("image2") -> "images"
+                format.contains("mp3") ||
+                        format.contains("flac") ||
+                        format.contains("m4a") -> "audio"
+                format.contains("mp4") ||
+                        format.contains("mov") ||
+                        format.contains("matroska") ||
+                        format.contains("webm") ||
+                        format.contains("asf") -> "video"
+                else -> throw Exception("Unrecognized format")
+            }
+
+            val fileExtension = when (mediaType) {
+                "images" -> "jpg"
+                "audio" -> "m3u8"
+                "video" -> "m3u8"
+                else -> throw Exception("Unrecognized format")
+            }
+
+            val mimeType = when (mediaType) {
+                "images" -> "image/jpeg"
+                "audio" -> "application/vnd.apple.mpegurl"
+                "video" -> "application/vnd.apple.mpegurl"
+                else -> throw Exception("Unrecognized format")
+            }
+
+            val outputFile = if (mediaType == "images") {
+                "${nameParts[0]}-new.${fileExtension}"
+            } else {
+                "${nameParts[0]}.${fileExtension}"
+            }
+
+            this.runFfmpegSimple(conversionPayload.file, outputFile, AppConfig.uploadDir, mediaType)
+            this.uploadFileToS3(nameParts[0], conversionPayload.userId, mediaType)
             Thread.sleep(1000)
-            this.cleanOutHlsDirectory(File(AppConfig.uploadDir  ), nameParts[0])
-            this.saveRecord(conversionPayload, settings, nameParts[0])
+            this.cleanOutHlsDirectory(File(AppConfig.uploadDir), nameParts[0]   )
+            this.saveRecord(conversionPayload, settings, "/${nameParts[0]}/${outputFile}", mimeType, mediaType)
         } catch (error:Exception) {
             println("**********************************************")
             println("An error has occurred")
@@ -80,33 +119,38 @@ class FileProcessor() : ProcessorInterface {
     }
 
     @OptIn(ExperimentalUuidApi::class)
-    private fun saveRecord(conversionPayload: ConversionPayload, settings: VideoMetadata, targetFile: String) {
+    private fun saveRecord(conversionPayload: ConversionPayload, settings: FileMetadata, targetFile: String, mimeType: String, mediaType: String) {
+        val mediaTypeId = when (mediaType) {
+            "video" -> 1
+            "audio" -> 2
+            "images" -> 7
+            else -> throw Exception("Unrecognized format")
+        }
+
         val entity = MediaLibraryEntryEntity()
         entity.setCode(Uuid.random().toString())
             .setTitle(conversionPayload.title)
             .setDescription(conversionPayload.description)
             .setKeywords(conversionPayload.keywords)
-            .setFilename("/${targetFile}/${targetFile}.m3u8")
-            .setMimeType("application/vnd.apple.mpegurl")
+            .setFilename(targetFile)
+            .setMimeType(mimeType)
             .setPublishDate(System.currentTimeMillis().toString())
             .setUserId(conversionPayload.userId.toInt())
             .setMediaLibraryId(conversionPayload.mediaLibraryId.toInt())
-            .setMediaTypeId(1)
+            .setMediaTypeId(mediaTypeId)
             .setStatusId(1)
         MediaLibraryEntryRepository()
             .save(entity)
     }
 
-    private fun runFfprobe(input: String, workingDir: String): VideoMetadata {
+    private fun runFfprobe(input: String, workingDir: String): FileMetadata {
         val command = listOf(
             "ffprobe",
             "-v", "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
             "stream=width,height,r_frame_rate,codec_name,bit_rate",
             "-show_entries",
-            "format=duration,bit_rate",
+            "format=duration,bit_rate,format_name",
             "-of", "json",
             input
         )
@@ -115,11 +159,12 @@ class FileProcessor() : ProcessorInterface {
             .redirectErrorStream(true)
             .start()
         val jsonOutput = process.inputStream.bufferedReader().readText()
+        println(jsonOutput)
         return Json.decodeFromString(jsonOutput)
     }
 
-    private fun runFfmpegSimple(input: String, output: String, workingDir: String) {
-        val command = listOf(
+    private fun videoCommand(input: String, output: String): List<String> {
+        return listOf(
             "ffmpeg",
             "-i", input,
             "-vf", "scale=-2:1080",
@@ -135,6 +180,42 @@ class FileProcessor() : ProcessorInterface {
             "-hls_playlist_type", "vod",
             output
         )
+    }
+
+    private fun audioCommand(input: String, output: String): List<String> {
+        return listOf(
+            "ffmpeg",
+            "-i", input,
+            "-c:a", "aac",
+            "-b:a", "320k",
+            "-map", "0:a",
+            "-ac", "2",
+            "-f", "hls",
+            "-hls_time", "6",
+            "-hls_list_size", "0",
+            "-hls_playlist_type", "vod",
+            output
+        )
+    }
+
+    private fun imageCommand(input: String, output: String): List<String> {
+        return listOf(
+            "ffmpeg",
+            "-i", input,
+            "-vf", "scale='min(1920,iw)':-1",
+            "-q:v", "2",
+            "-pix_fmt", "yuvj420p",
+            output
+        )
+    }
+
+    private fun runFfmpegSimple(input: String, output: String, workingDir: String, mediaType: String) {
+        val command = when (mediaType) {
+            "video" -> videoCommand(input, output)
+            "audio" -> audioCommand(input, output)
+            "images" -> imageCommand(input, output)
+            else -> throw Exception("Unrecognized media type")
+        }
 
         println("Starting FFmpeg process in directory: $workingDir")
 
@@ -162,7 +243,7 @@ class FileProcessor() : ProcessorInterface {
         }
     }
 
-    private fun uploadFileToS3(filename: String, userId: String) {
+    private fun uploadFileToS3(filename: String, userId: String, mediaType: String) {
         val accessKey = AppConfig.accessKey
         val secretKey = AppConfig.secretKey
         val minioEndpoint = AppConfig.s3Address
@@ -179,7 +260,7 @@ class FileProcessor() : ProcessorInterface {
             )
             .forcePathStyle(true)
             .build()
-        uploadHlsDirectory(s3, bucket, File(AppConfig.uploadDir), "/video/${userId}/$filename", filename)
+        uploadHlsDirectory(s3, bucket, File(AppConfig.uploadDir), "/${mediaType}/${userId}/$filename", filename)
         println("File uploaded successfully to MinIO!")
 
         // Close the client
@@ -196,6 +277,7 @@ class FileProcessor() : ProcessorInterface {
                 val contentType = when(path.toFile().extension) {
                     "ts" -> "video/MP2T"
                     "m3u8" -> "application/vnd.apple.mpegurl"
+                    "jpg" -> "image/jpeg"
                     else -> "application/octet-stream"
                 }
 
